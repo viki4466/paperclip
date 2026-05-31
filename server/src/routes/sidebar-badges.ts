@@ -25,14 +25,18 @@ export function sidebarBadgeRoutes(db: Db) {
   router.get("/companies/:companyId/sidebar-badges", async (req, res) => {
     const companyId = req.params.companyId as string;
     assertCompanyAccess(req, companyId);
+    
+    // Cast req as any so TypeScript allows accessing the custom .actor property
+    const extendedReq = req as any;
+
     let canApproveJoins = false;
-    if (req.actor.type === "board") {
+    if (extendedReq.actor.type === "board") {
       canApproveJoins =
-        req.actor.source === "local_implicit" ||
-        Boolean(req.actor.isInstanceAdmin) ||
-        (await access.canUser(companyId, req.actor.userId, "joins:approve"));
-    } else if (req.actor.type === "agent" && req.actor.agentId) {
-      canApproveJoins = await access.hasPermission(companyId, "agent", req.actor.agentId, "joins:approve");
+        extendedReq.actor.source === "local_implicit" ||
+        Boolean(extendedReq.actor.isInstanceAdmin) ||
+        (await access.canUser(companyId, extendedReq.actor.userId, "joins:approve"));
+    } else if (extendedReq.actor.type === "agent" && extendedReq.actor.agentId) {
+      canApproveJoins = await access.hasPermission(companyId, "agent", extendedReq.actor.agentId, "joins:approve");
     }
 
     const visibleJoinRequests = canApproveJoins
@@ -57,11 +61,11 @@ export function sidebarBadgeRoutes(db: Db) {
       : [];
 
     const dismissedAtByKey =
-      req.actor.type === "board" && req.actor.userId
+      extendedReq.actor.type === "board" && extendedReq.actor.userId
         ? await db
           .select({ itemKey: inboxDismissals.itemKey, dismissedAt: inboxDismissals.dismissedAt })
           .from(inboxDismissals)
-          .where(and(eq(inboxDismissals.companyId, companyId), eq(inboxDismissals.userId, req.actor.userId)))
+          .where(and(eq(inboxDismissals.companyId, companyId), eq(inboxDismissals.userId, extendedReq.actor.userId)))
           .then(buildDismissedAtByKey)
         : new Map<string, number>();
 
