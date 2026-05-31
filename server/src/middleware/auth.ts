@@ -1,5 +1,5 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import type { Request, RequestHandler } from "express";
+import type { Request, RequestHandler, Response, NextFunction } from "express";
 import { and, eq, isNull } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agentApiKeys, agents, authUsers, companies, companyMemberships, instanceUserRoles } from "@paperclipai/db";
@@ -9,7 +9,11 @@ import type { BetterAuthSessionResult } from "../auth/better-auth.js";
 import { logger } from "./logger.js";
 import { boardAuthService } from "../services/board-auth.js";
 
-// Global declaration configured accurately for module scope environments
+function hashToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+// Explicit structural typing for your custom Actor object
 export interface PaperclipActor {
   type: "board" | "none" | "agent" | string;
   userId?: string | null;
@@ -28,16 +32,9 @@ export interface PaperclipActor {
   }>;
 }
 
-declare global {
-  namespace Express {
-    interface Request {
-      actor: PaperclipActor;
-    }
-  }
-}
-
-function hashToken(token: string) {
-  return createHash("sha256").update(token).digest("hex");
+// Explicit Request interface extending basic Express Request
+export interface AuthenticatedRequest extends Request {
+  actor: PaperclipActor;
 }
 
 interface ActorMiddlewareOptions {
@@ -47,8 +44,10 @@ interface ActorMiddlewareOptions {
 
 export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHandler {
   const boardAuth = boardAuthService(db);
-  return async (req, _res, next) => {
-    req.actor =
+  return async (req: Request, _res: Response, next: NextFunction) => {
+    const authReq = req as AuthenticatedRequest;
+
+    authReq.actor =
       opts.deploymentMode === "local_trusted"
         ? {
             type: "board",
@@ -60,14 +59,14 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           }
         : { type: "none", source: "none" };
 
-    const runIdHeader = req.header("x-paperclip-run-id");
-    const authHeader = req.header("authorization");
-    
+    const runIdHeader = authReq.header("x-paperclip-run-id");
+
+    const authHeader = authReq.header("authorization");
     if (!authHeader?.toLowerCase().startsWith("bearer ")) {
       if (opts.deploymentMode === "authenticated" && opts.resolveSession) {
-        const cloudTenantActor = await resolveCloudTenantActor(db, req);
+        const cloudTenantActor = await resolveCloudTenantActor(db, authReq);
         if (cloudTenantActor) {
-          req.actor = {
+          authReq.actor = {
             ...cloudTenantActor,
             runId: runIdHeader ?? undefined,
           };
@@ -77,10 +76,10 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
 
         let session: BetterAuthSessionResult | null = null;
         try {
-          session = await opts.resolveSession(req);
+          session = await opts.resolveSession(authReq);
         } catch (err) {
           logger.warn(
-            { err, method: req.method, url: req.originalUrl },
+            { err, method: authReq.method, url: authReq.originalUrl },
             "Failed to resolve auth session from request headers",
           );
         }
@@ -107,14 +106,14 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
                 ),
               ),
           ]);
-          req.actor = {
+          authReq.actor = {
             type: "board",
             userId,
-            userName: session.user.name ?? null,
-            userEmail: session.user.email ?? null,
-            isInstanceAdmin: !!roleRow,
-            source: "session_cookie",
-            memberships: memberships.map(m => ({
+            userName: session.user.name,
+            userEmail: session.user.email,
+            isInstanceAdmin: Boolean(roleRow),
+            source: "better_auth_session",
+            memberships: memberships.map((m) => ({
               companyId: m.companyId,
               membershipRole: m.membershipRole ?? undefined,
               status: m.status,
@@ -126,14 +125,105 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
       return;
     }
 
-    // Keep token authentication code below intact
+    const token = authHeader.substring(7).trim();
+    if (!token) {
+      next();
+      return;
+    }
+
+    if (token.startsWith("pcp_agent_")) {
+      const tokenHash = hashToken(token);
+      const [keyRow] = await db
+        .select({
+          id: agentApiKeys.id,
+          agentId: agentApiKeys.agentId,
+          companyId: agentApiKeys.companyId,
+        })
+        .from(agentApiKeys)
+        .where(and(eq(agentApiKeys.tokenHash, tokenHash), isNull(agentApiKeys.archivedAt)))
+        .limit(1);
+
+      if (keyRow) {
+        const [agentRow] = await db
+          .select({ id: agents.id, name: agents.name })
+          .from(agents)
+          .where(eq(agents.id, keyRow.agentId))
+          .limit(1);
+
+        if (agentRow) {
+          authReq.actor = {
+            type: "agent",
+            agentId: agentRow.id,
+            agentName: agentRow.name,
+            companyId: keyRow.companyId,
+            source: "agent_api_key",
+            runId: runIdHeader ?? undefined,
+          };
+        }
+      }
+      next();
+      return;
+    }
+
+    try {
+      const payload = await verifyLocalAgentJwt(token);
+      if (payload) {
+        authReq.actor = {
+          type: "agent",
+          agentId: payload.agentId,
+          agentName: payload.agentName,
+          companyId: payload.companyId,
+          source: "agent_jwt",
+          runId: runIdHeader ?? undefined,
+        };
+      }
+    } catch (err) {
+      logger.debug({ err }, "Bearer token was not a valid local agent JWT");
+    }
+
     next();
   };
 }
 
-async function resolveCloudTenantActor(db: Db, req: Request) {
-  // Original multi-tenant lookup structure here
-  return null;
+async function resolveCloudTenantActor(db: Db, req: AuthenticatedRequest): Promise<PaperclipActor | null> {
+  const token = tokenFromAuthorizationHeader(req.header("authorization") ?? null);
+  if (!token) return null;
+
+  const expectedKey = process.env.PAPERCLIP_CLOUD_TENANT_SECRET;
+  if (!expectedKey || expectedKey.length < 16) return null;
+
+  if (!constantTimeStringEqual(token, expectedKey)) return null;
+
+  const stackId = requiredCloudHeader(req, "x-paperclip-cloud-stack-id");
+  const userId = requiredCloudHeader(req, "x-paperclip-cloud-user-id");
+  const userName = req.header("x-paperclip-cloud-user-name")?.trim() || "Cloud User";
+  const userEmail = req.header("x-paperclip-cloud-user-email")?.trim() || null;
+  const stackRole = stackMembershipRole(req.header("x-paperclip-cloud-stack-role"));
+
+  const companyId = cloudTenantCompanyId(stackId);
+
+  return {
+    type: "board",
+    userId,
+    userName,
+    userEmail,
+    memberships: [
+      {
+        companyId,
+        membershipRole: stackRole,
+        status: "active",
+      },
+    ],
+    isInstanceAdmin: true,
+    source: "cloud_tenant",
+  };
+}
+
+function tokenFromAuthorizationHeader(rawHeader: string | null): string | null {
+  const trimmed = rawHeader?.trim();
+  if (!trimmed) return null;
+  const bearerMatch = trimmed.match(/^bearer\s+(.+)$/i);
+  return bearerMatch?.[1] ? bearerMatch[1].trim() : trimmed;
 }
 
 function requiredCloudHeader(req: Request, name: string): string {

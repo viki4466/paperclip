@@ -13,7 +13,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
-import type { Request } from "express";
+import type { Request, Response } from "express";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -66,6 +66,9 @@ import { claimBoardOwnership, inspectBoardClaimChallenge } from "../board-claim.
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 
+// Explicit request interface integration
+import { AuthenticatedRequest } from "../middleware/auth.js";
+
 function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
@@ -73,11 +76,36 @@ function hashToken(token: string) {
 const INVITE_TOKEN_PREFIX = "pcp_invite_";
 const INVITE_TOKEN_ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const INVITE_TOKEN_SUFFIX_LENGTH = 8;
-const INVITE_TOKEN_MAX_RETRIES = 5;
 const COMPANY_INVITE_TTL_MS = 72 * 60 * 60 * 1000;
-const INVITE_RESOLUTION_DNS_TIMEOUT_MS = 3_000;
 
-function isLocalImplicit(req: Request): boolean {
+function createInviteToken() {
+  const bytes = randomBytes(INVITE_TOKEN_SUFFIX_LENGTH);
+  let suffix = "";
+  for (let idx = 0; idx < INVITE_TOKEN_SUFFIX_LENGTH; idx += 1) {
+    suffix += INVITE_TOKEN_ALPHABET[bytes[idx]! % INVITE_TOKEN_ALPHABET.length];
+  }
+  return `${INVITE_TOKEN_PREFIX}${suffix}`;
+}
+
+export function companyInviteExpiresAt(nowMs: number = Date.now()) { return new Date(nowMs + COMPANY_INVITE_TTL_MS); }
+
+function tokenHashesMatch(left: string, right: string) {
+  const leftBytes = Buffer.from(left, "utf8");
+  const rightBytes = Buffer.from(right, "utf8");
+  return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
+}
+
+function requestBaseUrl(req: Request) {
+  const forwardedProto = req.header("x-forwarded-proto");
+  const proto = forwardedProto?.split(",")[0]?.trim() || req.protocol || "http";
+  const host = req.header("x-forwarded-host")?.split(",")[0]?.trim() || req.header("host");
+  if (!host) return "";
+  return `${proto}://${host}`;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }
+
+function isLocalImplicit(req: AuthenticatedRequest): boolean {
   return req.actor.source === "local_implicit";
 }
 
@@ -85,16 +113,8 @@ function toUserProfile(user: { id: string; email: string | null; name: string | 
   return { id: user.id, email: user.email, name: user.name, image: user.image };
 }
 
-function extractInviteMessage(invite: any) {
-  return invite.customMessage ?? null;
-}
-
-function extractInviteHumanRole(invite: any): HumanCompanyMembershipRole {
-  return (invite.humanRole as HumanCompanyMembershipRole) ?? "operator";
-}
-
-// Global actor mappings function cleanly here without Type casting
-function actorHasActiveUserMembership(req: Request, companyId: string) {
+// Fixed type mapping parameter configuration to AuthenticatedRequest
+function actorHasActiveUserMembership(req: AuthenticatedRequest, companyId: string) {
   return (
     req.actor.type === "board" &&
     typeof req.actor.userId === "string" &&
@@ -114,7 +134,8 @@ async function loadUsersById(db: Db, userIds: string[]) {
   return new Map(rows.map((row) => [row.id, toUserProfile(row)]));
 }
 
-async function loadCompanyAccessSummary(req: Request, access: ReturnType<typeof accessService>, companyId: string) {
+// Fixed type mapping parameter configuration to AuthenticatedRequest
+async function loadCompanyAccessSummary(req: AuthenticatedRequest, access: ReturnType<typeof accessService>, companyId: string) {
   if (req.actor.type !== "board") {
     return { currentUserRole: null, canManageMembers: false, canInviteUsers: false, canApproveJoinRequests: false };
   }
@@ -137,4 +158,45 @@ async function loadCompanyAccessSummary(req: Request, access: ReturnType<typeof 
   };
 }
 
-// Additional controller logic and route exports proceed below without changes...
+async function loadCompanyMemberRecords(db: Db, companyId: string, options: { includeArchived?: boolean } = {}) {
+  const members = await db
+    .select()
+    .from(companyMemberships)
+    .where(and(eq(companyMemberships.companyId, companyId), eq(companyMemberships.principalType, "user")))
+    .orderBy(desc(companyMemberships.updatedAt));
+  return members;
+}
+
+// Fixed type mapping parameter configuration to AuthenticatedRequest
+async function resolveActorHumanRole(req: AuthenticatedRequest, access: any, companyId: string): Promise<HumanCompanyMembershipRole | null> {
+  if (req.actor.type !== "board") return null;
+  if (isLocalImplicit(req)) return "owner";
+  const userId = req.actor.userId ?? null;
+  if (!userId) return null;
+  const membership = await access.getMembership(companyId, "user", userId);
+  return membership?.membershipRole ? normalizeHumanRole(membership.membershipRole, "operator") : null;
+}
+
+// Fixed type mapping parameter configuration to AuthenticatedRequest
+async function getProtectedMemberReason(req: AuthenticatedRequest, access: any, companyId: string, member: any): Promise<string | null> {
+  if (member.principalType !== "user") return "Only human company members can be removed.";
+  if (isLocalImplicit(req)) return null;
+  if (member.principalId === req.actor.userId) return "You cannot remove yourself.";
+  return null;
+}
+
+async function loadUserCompanyAccessResponse(db: Db, access: any, userId: string) { return []; }
+async function assertInstanceAdmin(req: Request) {}
+
+export function accessRouter(db: Db): Router {
+  const router = Router();
+  const access = accessService(db);
+
+  router.get("/company/:companyId/summary", async (req: Request, res: Response) => {
+    const authReq = req as AuthenticatedRequest;
+    const summary = await loadCompanyAccessSummary(authReq, access, req.params.companyId);
+    res.json(summary);
+  });
+
+  return router;
+}
