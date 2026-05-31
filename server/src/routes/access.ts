@@ -66,7 +66,7 @@ import { claimBoardOwnership, inspectBoardClaimChallenge } from "../board-claim.
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
 
-// Explicit request interface integration
+// Import your custom authenticated interface cleanly
 import { AuthenticatedRequest } from "../middleware/auth.js";
 
 function hashToken(token: string) {
@@ -113,7 +113,6 @@ function toUserProfile(user: { id: string; email: string | null; name: string | 
   return { id: user.id, email: user.email, name: user.name, image: user.image };
 }
 
-// Fixed type mapping parameter configuration to AuthenticatedRequest
 function actorHasActiveUserMembership(req: AuthenticatedRequest, companyId: string) {
   return (
     req.actor.type === "board" &&
@@ -134,7 +133,6 @@ async function loadUsersById(db: Db, userIds: string[]) {
   return new Map(rows.map((row) => [row.id, toUserProfile(row)]));
 }
 
-// Fixed type mapping parameter configuration to AuthenticatedRequest
 async function loadCompanyAccessSummary(req: AuthenticatedRequest, access: ReturnType<typeof accessService>, companyId: string) {
   if (req.actor.type !== "board") {
     return { currentUserRole: null, canManageMembers: false, canInviteUsers: false, canApproveJoinRequests: false };
@@ -167,7 +165,6 @@ async function loadCompanyMemberRecords(db: Db, companyId: string, options: { in
   return members;
 }
 
-// Fixed type mapping parameter configuration to AuthenticatedRequest
 async function resolveActorHumanRole(req: AuthenticatedRequest, access: any, companyId: string): Promise<HumanCompanyMembershipRole | null> {
   if (req.actor.type !== "board") return null;
   if (isLocalImplicit(req)) return "owner";
@@ -177,7 +174,6 @@ async function resolveActorHumanRole(req: AuthenticatedRequest, access: any, com
   return membership?.membershipRole ? normalizeHumanRole(membership.membershipRole, "operator") : null;
 }
 
-// Fixed type mapping parameter configuration to AuthenticatedRequest
 async function getProtectedMemberReason(req: AuthenticatedRequest, access: any, companyId: string, member: any): Promise<string | null> {
   if (member.principalType !== "user") return "Only human company members can be removed.";
   if (isLocalImplicit(req)) return null;
@@ -193,6 +189,7 @@ export function accessRouter(db: Db): Router {
   const access = accessService(db);
 
   router.get("/company/:companyId/summary", async (req: Request, res: Response) => {
+    // Assert req as AuthenticatedRequest inline to prevent compilation blocks!
     const authReq = req as AuthenticatedRequest;
     const summary = await loadCompanyAccessSummary(authReq, access, req.params.companyId);
     res.json(summary);

@@ -13,7 +13,6 @@ function hashToken(token: string) {
   return createHash("sha256").update(token).digest("hex");
 }
 
-// Explicit structural typing for your custom Actor object
 export interface PaperclipActor {
   type: "board" | "none" | "agent" | string;
   userId?: string | null;
@@ -32,7 +31,6 @@ export interface PaperclipActor {
   }>;
 }
 
-// Explicit Request interface extending basic Express Request
 export interface AuthenticatedRequest extends Request {
   actor: PaperclipActor;
 }
