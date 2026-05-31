@@ -1,7 +1,9 @@
-import { Request } from 'express';
+import * as express from 'express';
 
-declare module 'express-serve-static-core' {
-  interface Request {
-    actor?: any;
+declare global {
+  namespace Express {
+    interface Request {
+      actor?: any; // Use your specific Actor type here if you have one
+    }
   }
 }
