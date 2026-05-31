@@ -1,19 +1,17 @@
 {
-  "extends": "../tsconfig.base.json",
   "compilerOptions": {
-    "outDir": "./dist",
-    "rootDir": "./src",
+    "target": "ES2022",
+    "module": "CommonJS",
+    "baseUrl": ".",
     "typeRoots": [
-      "../node_modules/@types",
+      "./node_modules/@types",
       "./src/types"
-    ]
+    ],
+    "paths": {
+      "*": ["node_modules/*", "src/types/*"]
+    }
   },
   "include": [
-    "src/**/*",
-    "src/types/express.d.ts"
-  ],
-  "exclude": [
-    "node_modules",
-    "dist"
+    "src/**/*"
   ]
 }
