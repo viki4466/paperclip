@@ -83,228 +83,21 @@ export function actorMiddleware(db: Db, opts: ActorMiddlewareOptions): RequestHa
           req.actor = {
             type: "board",
             userId,
-            userName: session.user.name ?? null,
-            userEmail: session.user.email ?? null,
-            companyIds: memberships.map((row) => row.companyId),
-            memberships,
+            userName: session.user.name,
+            userEmail: session.user.email,
             isInstanceAdmin: Boolean(roleRow),
-            runId: runIdHeader ?? undefined,
-            source: "session",
+            source: "better_auth_session",
+            memberships: memberships.map((m) => ({
+              companyId: m.companyId,
+              membershipRole: m.membershipRole ?? undefined,
+              status: m.status,
+            })),
           };
-          next();
-          return;
         }
       }
-      if (runIdHeader) req.actor.runId = runIdHeader;
       next();
       return;
     }
-
-    const token = authHeader.slice("bearer ".length).trim();
-    if (!token) {
-      next();
-      return;
-    }
-
-    const boardKey = await boardAuth.findBoardApiKeyByToken(token);
-    if (boardKey) {
-      const access = await boardAuth.resolveBoardAccess(boardKey.userId);
-      if (access.user) {
-        await boardAuth.touchBoardApiKey(boardKey.id);
-        req.actor = {
-          type: "board",
-          userId: boardKey.userId,
-          userName: access.user?.name ?? null,
-          userEmail: access.user?.email ?? null,
-          companyIds: access.companyIds,
-          memberships: access.memberships,
-          isInstanceAdmin: access.isInstanceAdmin,
-          keyId: boardKey.id,
-          runId: runIdHeader || undefined,
-          source: "board_key",
-        };
-        next();
-        return;
-      }
-    }
-
-    const tokenHash = hashToken(token);
-    const key = await db
-      .select()
-      .from(agentApiKeys)
-      .where(and(eq(agentApiKeys.keyHash, tokenHash), isNull(agentApiKeys.revokedAt)))
-      .then((rows) => rows[0] ?? null);
-
-    if (!key) {
-      const claims = verifyLocalAgentJwt(token);
-      if (!claims) {
-        next();
-        return;
-      }
-
-      const agentRecord = await db
-        .select()
-        .from(agents)
-        .where(eq(agents.id, claims.sub))
-        .then((rows) => rows[0] ?? null);
-
-      if (!agentRecord || agentRecord.companyId !== claims.company_id) {
-        next();
-        return;
-      }
-
-      if (agentRecord.status === "terminated" || agentRecord.status === "pending_approval") {
-        next();
-        return;
-      }
-
-      req.actor = {
-        type: "agent",
-        agentId: claims.sub,
-        companyId: claims.company_id,
-        keyId: undefined,
-        runId: runIdHeader || claims.run_id || undefined,
-        source: "agent_jwt",
-      };
-      next();
-      return;
-    }
-
-    await db
-      .update(agentApiKeys)
-      .set({ lastUsedAt: new Date() })
-      .where(eq(agentApiKeys.id, key.id));
-
-    const agentRecord = await db
-      .select()
-      .from(agents)
-      .where(eq(agents.id, key.agentId))
-      .then((rows) => rows[0] ?? null);
-
-    if (!agentRecord || agentRecord.status === "terminated" || agentRecord.status === "pending_approval") {
-      next();
-      return;
-    }
-
-    req.actor = {
-      type: "agent",
-      agentId: key.agentId,
-      companyId: key.companyId,
-      keyId: key.id,
-      runId: runIdHeader || undefined,
-      source: "agent_key",
-    };
-
-    next();
-  };
-}
-
-async function resolveCloudTenantActor(db: Db, req: Request): Promise<Express.Request["actor"] | null> {
-  const expectedToken = process.env.PAPERCLIP_CLOUD_TENANT_SERVER_TOKEN?.trim();
-  if (!expectedToken) return null;
-
-  const token = req.header("x-paperclip-cloud-tenant-token")?.trim();
-  if (!token || !constantTimeStringEqual(token, expectedToken)) return null;
-
-  const userId = requiredCloudHeader(req, "x-paperclip-cloud-user-id");
-  const userEmail = requiredCloudHeader(req, "x-paperclip-cloud-user-email").toLowerCase();
-  const stackId = requiredCloudHeader(req, "x-paperclip-cloud-stack-id");
-  const stackRole = stackMembershipRole(req.header("x-paperclip-cloud-stack-role"));
-  const userName = req.header("x-paperclip-cloud-user-name")?.trim() || userEmail;
-  const paperclipCompanyId = req.header("x-paperclip-cloud-paperclip-company-id")?.trim();
-  const companyId = cloudTenantCompanyId(stackId);
-  const companyName = paperclipCompanyId || `${stackId} Paperclip`;
-  const now = new Date();
-
-  await db
-    .insert(authUsers)
-    .values({
-      id: userId,
-      name: userName,
-      email: userEmail,
-      emailVerified: true,
-      image: null,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: authUsers.id,
-      set: {
-        name: userName,
-        email: userEmail,
-        emailVerified: true,
-        updatedAt: now,
-      },
-    });
-
-  await db
-    .insert(instanceUserRoles)
-    .values({
-      userId,
-      role: "instance_admin",
-      updatedAt: now,
-    })
-    .onConflictDoNothing({
-      target: [instanceUserRoles.userId, instanceUserRoles.role],
-    });
-
-  await db
-    .insert(companies)
-    .values({
-      id: companyId,
-      name: companyName,
-      description: `Provisioned by Paperclip Cloud for stack ${stackId}.`,
-      status: "active",
-      issuePrefix: issuePrefixForCloudStack(stackId),
-      updatedAt: now,
-    })
-    .onConflictDoNothing({
-      target: companies.id,
-    });
-
-  const membershipRole = stackRole === "owner" || stackRole === "admin" ? "owner" : stackRole;
-  const membership = await db
-    .insert(companyMemberships)
-    .values({
-      companyId,
-      principalType: "user",
-      principalId: userId,
-      status: "active",
-      membershipRole,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [
-        companyMemberships.companyId,
-        companyMemberships.principalType,
-        companyMemberships.principalId,
-      ],
-      set: {
-        status: "active",
-        membershipRole,
-        updatedAt: now,
-      },
-    })
-    .returning()
-    .then((rows) => rows[0] ?? {
-      companyId,
-      membershipRole,
-      status: "active",
-    });
-
-  return {
-    type: "board",
-    userId,
-    userName,
-    userEmail,
-    companyIds: [companyId],
-    memberships: [{
-      companyId,
-      membershipRole: membership.membershipRole,
-      status: membership.status,
-    }],
-    isInstanceAdmin: true,
-    source: "cloud_tenant",
   };
 }
 
@@ -334,14 +127,5 @@ function cloudTenantCompanyId(stackId: string): string {
   bytes[6] = (bytes[6] & 0x0f) | 0x50;
   bytes[8] = (bytes[8] & 0x3f) | 0x80;
   const hex = bytes.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
-}
-
-function issuePrefixForCloudStack(stackId: string): string {
-  const hash = createHash("sha256").update(stackId).digest("hex").slice(0, 4).toUpperCase();
-  return `PC${hash}`;
-}
-
-export function requireBoard(req: Express.Request) {
-  return req.actor.type === "board";
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-...`;
 }
