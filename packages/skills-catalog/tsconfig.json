@@ -1,8 +1,7 @@
 {
-  "extends": "../../tsconfig.base.json",
-  "compilerOptions": {
-    "outDir": "dist",
-    "rootDir": "."
-  },
-  "include": ["generated/**/*.json", "scripts/**/*.ts", "src/**/*.ts"]
+  "compilerOptions": { ... },
+  "files": [
+    // Remove the express.d.ts line from here entirely
+  ],
+  "include": ["src/**/*"]
 }
