@@ -13,7 +13,7 @@ import { isIP } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Router } from "express";
-import type { Request, Response } from "express";
+import type { Request } from "express";
 import { and, desc, eq, gt, inArray, isNotNull, isNull, lte, ne, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
@@ -58,9 +58,6 @@ import { assertAuthenticated, assertCompanyAccess } from "./authz.js";
 import { claimBoardOwnership, inspectBoardClaimChallenge } from "../board-claim.js";
 import { claimFirstInstanceAdmin } from "../first-admin-claim.js";
 import { getStorageService } from "../storage/index.js";
-
-// Import your custom explicit request type mapping
-import { AuthenticatedRequest } from "../middleware/auth.js";
 
 function hashToken(token: string) { return createHash("sha256").update(token).digest("hex"); }
 const INVITE_TOKEN_PREFIX = "pcp_invite_";
@@ -168,8 +165,7 @@ function toInviteSummaryResponse(req: Request, token: string, invite: typeof inv
 function toUserProfile(user: any) { return { id: user.id }; }
 async function assertInstanceAdmin(req: Request) {}
 
-// UPDATED: Accepting explicitly typed AuthenticatedRequest structures cleanly 
-function actorHasActiveUserMembership(req: AuthenticatedRequest, companyId: string) {
+function actorHasActiveUserMembership(req: Request, companyId: string) {
   return (
     req.actor.type === "board" &&
     typeof req.actor.userId === "string" &&
@@ -178,8 +174,7 @@ function actorHasActiveUserMembership(req: AuthenticatedRequest, companyId: stri
   );
 }
 
-// UPDATED: Accepting explicitly typed AuthenticatedRequest structures cleanly
-async function loadCompanyAccessSummary(req: AuthenticatedRequest, access: any, companyId: string) {
+async function loadCompanyAccessSummary(req: Request, access: any, companyId: string) {
   if (req.actor.type !== "board") {
     return { currentUserRole: null, canManageMembers: false, canInviteUsers: false, canApproveJoinRequests: false };
   }
@@ -201,8 +196,7 @@ async function loadCompanyMemberRecords(db: Db, companyId: string, options: { in
   return members;
 }
 
-// UPDATED: Accepting explicitly typed AuthenticatedRequest structures cleanly
-async function resolveActorHumanRole(req: AuthenticatedRequest, access: any, companyId: string): Promise<HumanCompanyMembershipRole | null> {
+async function resolveActorHumanRole(req: Request, access: any, companyId: string): Promise<HumanCompanyMembershipRole | null> {
   if (req.actor.type !== "board") return null;
   const userId = req.actor.userId ?? null;
   if (!userId) return null;
@@ -210,8 +204,7 @@ async function resolveActorHumanRole(req: AuthenticatedRequest, access: any, com
   return membership?.membershipRole ? normalizeHumanRole(membership.membershipRole, "operator") : null;
 }
 
-// UPDATED: Accepting explicitly typed AuthenticatedRequest structures cleanly
-async function getProtectedMemberReason(req: AuthenticatedRequest, access: any, companyId: string, member: any): Promise<string | null> {
+async function getProtectedMemberReason(req: Request, access: any, companyId: string, member: any): Promise<string | null> {
   if (member.principalType !== "user") return "Only human company members can be removed.";
   if (member.principalId === req.actor.userId) return "You cannot remove yourself.";
   return null;
@@ -221,11 +214,10 @@ async function loadUserCompanyAccessResponse(db: Db, access: any, userId: string
 
 export function accessRouter(db: Db): Router {
   const router = Router();
-  
-  // Custom router wrappers can safely execute explicit type assertions on core handlers
+  const access = accessService(db);
+
   router.get("/company/:companyId/summary", async (req, res) => {
-    const authReq = req as AuthenticatedRequest;
-    const summary = await loadCompanyAccessSummary(authReq, {}, req.params.companyId);
+    const summary = await loadCompanyAccessSummary(req, access, req.params.companyId);
     res.json(summary);
   });
 
